@@ -18,7 +18,6 @@ Preferred distribution is via the Ponti Studios Homebrew tap.
 For local development:
 
 ```bash
-cd apps/geokit
 swift run geokit -- --help
 ```
 
@@ -137,16 +136,17 @@ Optional: `apple_maps_json`
 
 ```bash
 # Build
-cd apps/geokit && swift build
+swift build
 
 # Run from source
-cd apps/geokit && swift run geokit -- geocode "New York"
+swift run geokit -- geocode "New York"
+swift run geokit-review
 
 # Run binary directly
-./apps/geokit/.build/debug/geokit geocode "New York"
-./apps/geokit/.build/debug/geokit-review
+.build/debug/geokit geocode "New York"
+.build/debug/geokit-review
 
-# Install globally via repo helper
+# Install globally
 just install-geokit
 ```
 
