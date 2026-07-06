@@ -3,9 +3,103 @@ import CoreLocation
 import Foundation
 import MapKit
 
+// MARK: - SQLite Runner (Process-based)
+
+enum SQLiteRunner {
+    static func run(dbPath: String, sql: String) throws -> Data {
+        let sqlite3Path = "/usr/bin/sqlite3"
+        guard FileManager.default.fileExists(atPath: sqlite3Path) else {
+            throw SQLiteRunnerError.sqlite3NotFound
+        }
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sqlite3Path)
+        process.arguments = ["-separator", "|", dbPath, sql]
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        let stdoutData = LockedData()
+        let stderrData = LockedData()
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            } else {
+                stdoutData.append(chunk)
+            }
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+            } else {
+                stderrData.append(chunk)
+            }
+        }
+
+        try process.run()
+        process.waitUntilExit()
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+
+        guard process.terminationStatus == 0 else {
+            let message = String(data: stderrData.value, encoding: .utf8) ?? "sqlite3 exited with status \(process.terminationStatus)"
+            throw SQLiteRunnerError.commandFailed(message)
+        }
+
+        return stdoutData.value
+    }
+}
+
+enum SQLiteRunnerError: Error, LocalizedError {
+    case sqlite3NotFound
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .sqlite3NotFound: return "sqlite3 CLI not found at /usr/bin/sqlite3"
+        case .commandFailed(let msg): return msg
+        }
+    }
+}
+
+private final class LockedData: @unchecked Sendable {
+    private var _value = Data()
+    private let lock = NSLock()
+    var value: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return _value
+    }
+    func append(_ data: Data) {
+        lock.lock()
+        _value.append(data)
+        lock.unlock()
+    }
+}
+
+// MARK: - CNPostalAddress Helpers
+
+extension CNPostalAddress {
+    var formattedAddressLines: [String] {
+        var lines: [String] = []
+        if !street.isEmpty { lines.append(street) }
+        let cityStatePostal = [city, state, postalCode].filter { !$0.isEmpty }.joined(separator: ", ")
+        if !cityStatePostal.isEmpty { lines.append(cityStatePostal) }
+        if !country.isEmpty { lines.append(country) }
+        return lines
+    }
+}
+
 enum ParsedCommand {
     case geocode(GeocodeOptions)
     case geocodeCSV(GeocodeCSVOptions)
+    case enrichDB(EnrichDBOptions)
 }
 
 struct GeocodeOptions {
@@ -18,6 +112,13 @@ struct GeocodeCSVOptions {
     let column: String
     let outputFile: String
     let includeJSON: Bool
+    let pacingMs: Int
+}
+
+struct EnrichDBOptions {
+    let dbPath: String
+    let limit: Int?
+    let dryRun: Bool
     let pacingMs: Int
 }
 
@@ -38,6 +139,8 @@ struct CLI {
             self.command = try CLI.parseGeocode(arguments: Array(normalizedArguments.dropFirst()))
         case "geocode-csv":
             self.command = try CLI.parseGeocodeCSV(arguments: Array(normalizedArguments.dropFirst()))
+        case "enrich-db":
+            self.command = try CLI.parseEnrichDB(arguments: Array(normalizedArguments.dropFirst()))
         default:
             self.command = try CLI.parseGeocode(arguments: normalizedArguments)
         }
@@ -148,6 +251,45 @@ struct CLI {
         )
     }
 
+    static func parseEnrichDB(arguments: [String]) throws -> ParsedCommand {
+        var dbPath = NSHomeDirectory() + "/.hominem/warehouse.db"
+        var limit: Int?
+        var dryRun = false
+        var pacingMs: Int?
+        var index = 0
+
+        while index < arguments.count {
+            let argument = arguments[index]
+            switch argument {
+            case "--help", "-h":
+                CLI.printUsageAndExit()
+            case "--db":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(argument) }
+                dbPath = arguments[index]
+            case "--limit":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(argument) }
+                guard let parsed = Int(arguments[index]), parsed > 0 else { throw CLIError.invalidLimit }
+                limit = parsed
+            case "--dry-run":
+                dryRun = true
+            case "--pacing":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue(argument) }
+                guard let parsed = Int(arguments[index]), parsed >= 0 else { throw CLIError.invalidPacing }
+                pacingMs = parsed
+            default:
+                throw CLIError.unknownOption(argument)
+            }
+            index += 1
+        }
+
+        let effectivePacing = pacingMs ?? Int(ProcessInfo.processInfo.environment["GEOKIT_CSV_PACING_MS"] ?? "").flatMap { Int($0) }.flatMap { $0 >= 0 ? $0 : nil } ?? 1100
+
+        return .enrichDB(EnrichDBOptions(dbPath: dbPath, limit: limit, dryRun: dryRun, pacingMs: effectivePacing))
+    }
+
     static func defaultOutputPath(for inputFile: String) -> String {
         let url = URL(fileURLWithPath: inputFile)
         let withoutExtension = url.deletingPathExtension()
@@ -162,17 +304,22 @@ usage:
   geokit [--limit N] <query>
   geokit geocode [--limit N] <query>
   geokit geocode-csv -f <file> -c <column> [-o <output>] [--include-json] [--pacing <ms>]
+  geokit enrich-db [--db <path>] [--limit N] [--dry-run] [--pacing <ms>]
 
 Examples:
   geokit "Cupertino, CA"
   geokit geocode --limit 3 "coffee near Apple Park"
   geokit geocode-csv -f locations.csv -c city
   geokit geocode-csv -f locations.csv -c city --include-json
+  geokit enrich-db --limit 10
+  geokit enrich-db --dry-run
 
 Notes:
   - geocode emits pretty-printed JSON with Apple Maps result data.
   - geocode-csv adds lat, lon, city, state, country, country_code columns.
   - --include-json adds an apple_maps_json column containing full result JSON.
+  - enrich-db geocodes places in warehouse.db that are missing coordinates
+    or formatted_address and writes the results back. Use --dry-run to preview.
   - --pacing controls delay between API calls (default 1100ms).
   - GEOKIT_CSV_PACING_MS environment variable also controls pacing.
 
@@ -366,6 +513,8 @@ struct Geo {
             case .geocodeCSV(let options):
                 try await geocodeCSV(options)
                 print("wrote geocoded CSV to \(options.outputFile)")
+            case .enrichDB(let options):
+                try await enrichDB(options)
             }
         } catch {
             fputs("error: \(error)\n", stderr)
@@ -469,6 +618,144 @@ struct Geo {
         )
     }
 
+    // MARK: - enrich-db
+
+    static func enrichDB(_ options: EnrichDBOptions) async throws {
+        let rows = try readPlacesFromDB(dbPath: options.dbPath, limit: options.limit)
+        guard !rows.isEmpty else {
+            print("No places found that need geocoding.")
+            return
+        }
+
+        print("Found \(rows.count) place(s) to geocode\(options.dryRun ? " (dry-run)" : "").")
+
+        var updated = 0
+        var failed = 0
+
+        for (index, row) in rows.enumerated() {
+            let query = [row.name, row.city, row.state, row.country]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+
+            fputs("  [\(index + 1)/\(rows.count)] \"\(query)\" ... ", stderr)
+
+            do {
+                let payload = try await search(query: query, limit: 1)
+                guard let result = payload.results.first else {
+                    fputs("no results\n", stderr)
+                    failed += 1
+                    continue
+                }
+
+                let pm = result.placemark
+                let addr = pm.formattedAddressLines?.joined(separator: ", ") ?? ""
+
+                if options.dryRun {
+                    fputs("would update: lat=\(pm.coordinate.latitude) lon=\(pm.coordinate.longitude) addr=\"\(addr)\"\n", stderr)
+                    updated += 1
+                } else {
+                    try updatePlaceInDB(
+                        dbPath: options.dbPath,
+                        id: row.id,
+                        latitude: pm.coordinate.latitude,
+                        longitude: pm.coordinate.longitude,
+                        formattedAddress: addr,
+                        city: pm.locality ?? pm.subLocality ?? "",
+                        state: pm.administrativeArea ?? "",
+                        postalCode: pm.postalCode ?? "",
+                        country: pm.country ?? "",
+                        countryCode: pm.isoCountryCode?.lowercased() ?? ""
+                    )
+                    fputs("updated\n", stderr)
+                    updated += 1
+                }
+            } catch {
+                fputs("error: \(error.localizedDescription)\n", stderr)
+                failed += 1
+            }
+
+            if index < rows.count - 1 {
+                try await Task.sleep(for: .milliseconds(options.pacingMs))
+            }
+        }
+
+        print("\n\(options.dryRun ? "Would update" : "Updated") \(updated) place(s)\(failed > 0 ? ", \(failed) failed" : "").")
+    }
+
+    struct PlaceRow {
+        let id: Int
+        let name: String
+        let city: String?
+        let state: String?
+        let country: String?
+    }
+
+    static func readPlacesFromDB(dbPath: String, limit: Int?) throws -> [PlaceRow] {
+        let limitClause = limit.map { "LIMIT \($0)" } ?? ""
+        let sql = """
+        SELECT id, name, city, state, country
+        FROM places
+        WHERE name IS NOT NULL AND name != ''
+          AND (latitude IS NULL OR formatted_address IS NULL OR formatted_address = '')
+        ORDER BY id ASC
+        \(limitClause);
+        """
+
+        let data = try SQLiteRunner.run(dbPath: dbPath, sql: sql)
+        guard !data.isEmpty else { return [] }
+
+        let output = String(data: data, encoding: .utf8) ?? ""
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
+        return lines.compactMap { line in
+            let parts = line.split(separator: "|", omittingEmptySubsequences: false)
+            guard parts.count >= 5, let id = Int(parts[0]) else { return nil }
+            return PlaceRow(
+                id: id,
+                name: String(parts[1]),
+                city: parts[2].isEmpty ? nil : String(parts[2]),
+                state: parts[3].isEmpty ? nil : String(parts[3]),
+                country: parts[4].isEmpty ? nil : String(parts[4])
+            )
+        }
+    }
+
+    static func updatePlaceInDB(
+        dbPath: String,
+        id: Int,
+        latitude: Double,
+        longitude: Double,
+        formattedAddress: String,
+        city: String,
+        state: String,
+        postalCode: String,
+        country: String,
+        countryCode: String
+    ) throws {
+        let escapedAddr = formattedAddress.replacingOccurrences(of: "'", with: "''")
+        let escapedCity = city.replacingOccurrences(of: "'", with: "''")
+        let escapedState = state.replacingOccurrences(of: "'", with: "''")
+        let escapedPostal = postalCode.replacingOccurrences(of: "'", with: "''")
+        let escapedCountry = country.replacingOccurrences(of: "'", with: "''")
+        let escapedCC = countryCode.replacingOccurrences(of: "'", with: "''")
+
+        let sql = """
+        UPDATE places
+        SET latitude = \(latitude),
+            longitude = \(longitude),
+            formatted_address = '\(escapedAddr)',
+            city = '\(escapedCity)',
+            state = '\(escapedState)',
+            postal_code = '\(escapedPostal)',
+            country = '\(escapedCountry)',
+            country_code = '\(escapedCC)',
+            geocoded_at = datetime('now')
+        WHERE id = \(id);
+        """
+
+        _ = try SQLiteRunner.run(dbPath: dbPath, sql: sql)
+    }
+
     static func search(query: String, limit: Int) async throws -> SearchResponsePayload {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
@@ -499,11 +786,13 @@ struct Geo {
     }
 
     static func placemarkPayload(from item: MKMapItem) -> PlacemarkPayload {
+        let postalAddress = item.placemark.postalAddress
         let addressRepresentations = item.addressRepresentations
-        let formattedAddressLines = addressRepresentations?
-            .fullAddress(includingRegion: true, singleLine: false)?
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
+        let formattedAddressLines = postalAddress?.formattedAddressLines
+            ?? addressRepresentations?
+                .fullAddress(includingRegion: true, singleLine: false)?
+                .split(whereSeparator: \.isNewline)
+                .map(String.init)
 
         return PlacemarkPayload(
             title: displayTitle(for: item),
@@ -516,17 +805,17 @@ struct Geo {
             inlandWater: nil,
             ocean: nil,
             name: item.name,
-            country: addressRepresentations?.regionName,
-            isoCountryCode: nil,
-            administrativeArea: nil,
-            subAdministrativeArea: nil,
-            locality: addressRepresentations?.cityName,
-            subLocality: nil,
+            country: postalAddress?.country ?? addressRepresentations?.regionName,
+            isoCountryCode: postalAddress?.isoCountryCode,
+            administrativeArea: postalAddress?.state,
+            subAdministrativeArea: postalAddress?.subAdministrativeArea,
+            locality: postalAddress?.city ?? addressRepresentations?.cityName,
+            subLocality: postalAddress?.subLocality,
             thoroughfare: item.address?.shortAddress,
             subThoroughfare: nil,
-            postalCode: nil,
+            postalCode: postalAddress?.postalCode,
             formattedAddressLines: formattedAddressLines,
-            postalAddress: nil
+            postalAddress: postalAddress.map(PostalAddressPayload.init)
         )
     }
 
