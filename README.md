@@ -1,210 +1,107 @@
 # geokit
 
-Canonical upstream for the `geokit` CLI and `geokit-review` macOS review app.
-`/Users/charlesponti/Developer/toolbox` consumes this repo through an explicit
-sync workflow so the standalone geospatial tool can evolve independently.
+geokit is a Swift package that provides a geocoding CLI for Apple Maps and a native macOS review application for curating place data. It is designed for workflows that need reliable place lookup and manual review of geocoded results.
 
-Swift CLI for Apple Maps geocoding and CSV enrichment using `MapKit`.
+## What this repository contains
+
+- A CLI executable named `geokit` for geocoding individual queries and enriching SQLite data
+- A macOS app executable named `geokit-review` for reviewing and correcting place records in a SQLite database
+- A test target covering the core geocoding package behavior
 
 ## Requirements
 
 - macOS
-- Swift 6+
+- Swift 6.2+
+- Xcode Command Line Tools
 
-## Install
-
-Preferred distribution is via the Ponti Studios Homebrew tap.
+## Installation
 
 For local development:
+
+```bash
+swift build
+```
+
+To run the CLI:
 
 ```bash
 swift run geokit -- --help
 ```
 
-To install a global binary from this repo:
+To install the CLI globally from this repository:
 
 ```bash
 just install-geokit
 ```
 
-## Commands
+## CLI usage
 
-### `geocode` - Lookup a place name
+### Geocode a place
 
 ```bash
-geokit geocode [--limit N] <query>
+geokit "Paris, France"
 ```
 
-You can also omit the subcommand and run:
+Or explicitly:
 
 ```bash
-geokit <query>
-```
-
-**Examples:**
-
-```bash
-geokit "Mahopac, New York"
 geokit geocode "Paris, France"
-geokit geocode "1600 Amphitheatre Parkway, Mountain View, CA"
-geokit geocode "Empire State Building"
-geokit geocode "Japan"
-geokit geocode "90210"
 geokit geocode --limit 3 "coffee near Apple Park"
 ```
 
-**Output:**
-
-`geocode` emits pretty-printed JSON so you can inspect Apple Maps result data, including:
+The command emits pretty-printed JSON with Apple Maps result data, including:
 
 - query metadata
-- bounding region
-- all returned result payloads
-- `MKMapItem` fields like `name`, `phoneNumber`, `url`, `pointOfInterestCategory`
-- detailed `MKPlacemark` fields like coordinates, address components, timezone, areas of interest, and postal address data when available
+- bounding region information
+- result payloads
+- `MKMapItem` fields such as name, phone number, URL, and category
+- `MKPlacemark` details such as coordinates, address components, timezone, and region data
 
----
+### Enrich a SQLite database
 
-### `geokit-review` - Native macOS review UI for `place_review_candidates`
+```bash
+geokit enrich-db --limit 10
+```
 
-A separate executable target, `geokit-review`, opens a SwiftUI macOS app for browsing and curating places directly from `~/.hominem/warehouse.db`.
+This command reads place records from a SQLite database, geocodes rows that are missing location data, and writes the results back. Use `--dry-run` to preview changes without writing them.
+
+## Review app
+
+The `geokit-review` executable launches a SwiftUI macOS app for browsing and curating place records from a SQLite database at `$HOME/.hominem/warehouse.db`.
 
 ```bash
 swift run geokit-review
 ```
 
-`geokit-review` always uses `$HOME/.hominem/warehouse.db` and creates the file if it does not already exist.
+The app supports:
 
-Current capabilities:
+- browsing place records from the database
+- filtering by review state
+- text search across names, queries, and addresses
+- map-based inspection with markers
+- reviewing and editing place metadata
+- retrying Apple Maps geocoding for selected rows
+- saving accepted matches back to the database
 
-- reads directly from `places`
-- filters by review state (`needs_review`, `ok`, `no_match`, `not_a_place`, `unknown`)
-- supports text search across names, queries, and addresses
-- shows filtered places on a MapKit map with markers
-- displays an editorial place detail view
-- lets you edit and save `places.review_query`
-- retries Apple Maps geocoding for the selected place
-- renders Apple Maps matches as selection cards
-- `Use This Place` writes the selected result back to `places`
-- accepted matches are logged in `place_geocode_attempts`
+## Development
 
-This is now the main manual review and curation surface, while the `geokit` CLI remains the automation/batch tool.
-
----
-
-### `geocode-csv` - Geocode a CSV column
+Build and run from source:
 
 ```bash
-geokit geocode-csv -f <file> -c <column> [-o <output>] [--include-json]
-```
-
-**Options:**
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-f, --file <FILE>` | Input CSV file (required) | - |
-| `-c, --column <COLUMN>` | Column to geocode (required) | - |
-| `-o, --output <OUTPUT>` | Output CSV file | `<input>.geocoded.csv` |
-| `--include-json` | Add an `apple_maps_json` column with the full first result payload | off |
-
-**Examples:**
-
-```bash
-geokit geocode-csv -f locations.csv -c city
-geokit geocode-csv -f locations.csv -c city -o geocoded_locations.csv
-geokit geocode-csv -f /data/addresses.csv -c address -o /output/geocoded.csv
-geokit geocode-csv -f stores.csv -c "Store Location"
-geokit geocode-csv -f customers.csv -c "Full Address"
-geokit geocode-csv -f locations.csv -c city --include-json
-```
-
-**Input CSV Format:**
-
-```csv
-name,city,state
-Store A,"New York, NY",NY
-Store B,"Los Angeles, CA",CA
-```
-
-**Output CSV adds columns:** `lat,lon,city,state,country,country_code`
-
-Optional: `apple_maps_json`
-
----
-
-## Build & Run
-
-```bash
-# Build
 swift build
-
-# Run from source
 swift run geokit -- geocode "New York"
 swift run geokit-review
-
-# Run binary directly
-.build/debug/geokit geocode "New York"
-.build/debug/geokit-review
-
-# Install globally
-just install-geokit
 ```
 
----
-
-## Testing Checklist
-
-### geocode command
-- [ ] City lookup (e.g., "Paris, France")
-- [ ] Address lookup (e.g., "1600 Amphitheatre Parkway")
-- [ ] Landmark lookup (e.g., "Empire State Building")
-- [ ] Country lookup (e.g., "Japan")
-- [ ] Postal code lookup (e.g., "90210")
-- [ ] International locations (non-English characters)
-- [ ] Invalid/non-existent locations
-- [ ] Multi-result lookup with `--limit`
-
-### geocode-csv command
-- [ ] Basic CSV with city column
-- [ ] CSV with address column
-- [ ] Custom output file path
-- [ ] Default output file naming
-- [ ] CSV with quoted fields
-- [ ] Missing column error
-- [ ] Missing file error
-- [ ] Large CSV file (100+ rows)
-- [ ] `--include-json` output column
-
----
-
-## API Notes
-
-- **Provider:** Apple Maps via `MKLocalSearch`
-- **Platform:** macOS only
-- **CSV pacing:** 1.1s delay between uncached lookups
-- **Result caching:** duplicate CSV queries are cached within a run
-
----
-
-## Release
-
-Release assets are published from tags like `geokit-v0.1.0`.
-
-## Downstream Sync
-
-To sync this repo back into `toolbox`:
+Run the test suite:
 
 ```bash
-cd /Users/charlesponti/Developer/toolbox
-just sync-geokit-from-geo
+swift test
 ```
 
----
+## Notes
 
-## Technical Notes
-
-- Built as a Swift Package executable
-- Uses `MapKit`, `CoreLocation`, and `Contacts`
-- `geocode` emits rich JSON payloads for capability inspection
-- `geocode-csv` uses the first Apple Maps result for enrichment
-- CSV parsing and writing are implemented in-process for portability within the Swift CLI
+- The CLI uses Apple Maps via `MKLocalSearch`
+- The package targets macOS only
+- SQLite enrichment uses a configurable pacing interval between lookups, which defaults to 1100 ms
+- The review app is the preferred manual curation surface, while the CLI remains the automation-oriented entry point

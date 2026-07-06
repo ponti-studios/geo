@@ -98,21 +98,12 @@ extension CNPostalAddress {
 
 enum ParsedCommand {
     case geocode(GeocodeOptions)
-    case geocodeCSV(GeocodeCSVOptions)
     case enrichDB(EnrichDBOptions)
 }
 
 struct GeocodeOptions {
     let query: String
     let limit: Int
-}
-
-struct GeocodeCSVOptions {
-    let inputFile: String
-    let column: String
-    let outputFile: String
-    let includeJSON: Bool
-    let pacingMs: Int
 }
 
 struct EnrichDBOptions {
@@ -137,8 +128,6 @@ struct CLI {
             CLI.printUsageAndExit()
         case "geocode":
             self.command = try CLI.parseGeocode(arguments: Array(normalizedArguments.dropFirst()))
-        case "geocode-csv":
-            self.command = try CLI.parseGeocodeCSV(arguments: Array(normalizedArguments.dropFirst()))
         case "enrich-db":
             self.command = try CLI.parseEnrichDB(arguments: Array(normalizedArguments.dropFirst()))
         default:
@@ -183,74 +172,6 @@ struct CLI {
         return .geocode(GeocodeOptions(query: query, limit: limit))
     }
 
-    static func parseGeocodeCSV(arguments: [String]) throws -> ParsedCommand {
-        var inputFile: String?
-        var column: String?
-        var outputFile: String?
-        var includeJSON = false
-        var pacingMs: Int?
-        var index = 0
-
-        while index < arguments.count {
-            let argument = arguments[index]
-            switch argument {
-            case "--help", "-h":
-                CLI.printUsageAndExit()
-            case "-f", "--file":
-                index += 1
-                guard index < arguments.count else {
-                    throw CLIError.missingValue(argument)
-                }
-                inputFile = arguments[index]
-            case "-c", "--column":
-                index += 1
-                guard index < arguments.count else {
-                    throw CLIError.missingValue(argument)
-                }
-                column = arguments[index]
-            case "-o", "--output":
-                index += 1
-                guard index < arguments.count else {
-                    throw CLIError.missingValue(argument)
-                }
-                outputFile = arguments[index]
-            case "--include-json":
-                includeJSON = true
-            case "--pacing":
-                index += 1
-                guard index < arguments.count else {
-                    throw CLIError.missingValue(argument)
-                }
-                guard let parsed = Int(arguments[index]), parsed >= 0 else {
-                    throw CLIError.invalidPacing
-                }
-                pacingMs = parsed
-            default:
-                throw CLIError.unknownOption(argument)
-            }
-            index += 1
-        }
-
-        guard let inputFile else {
-            throw CLIError.missingRequired("--file")
-        }
-        guard let column else {
-            throw CLIError.missingRequired("--column")
-        }
-
-        let effectivePacing = pacingMs ?? Int(ProcessInfo.processInfo.environment["GEOKIT_CSV_PACING_MS"] ?? "").flatMap { Int($0) }.flatMap { $0 >= 0 ? $0 : nil } ?? 1100
-
-        return .geocodeCSV(
-            GeocodeCSVOptions(
-                inputFile: inputFile,
-                column: column,
-                outputFile: outputFile ?? defaultOutputPath(for: inputFile),
-                includeJSON: includeJSON,
-                pacingMs: effectivePacing
-            )
-        )
-    }
-
     static func parseEnrichDB(arguments: [String]) throws -> ParsedCommand {
         var dbPath = NSHomeDirectory() + "/.hominem/warehouse.db"
         var limit: Int?
@@ -290,38 +211,25 @@ struct CLI {
         return .enrichDB(EnrichDBOptions(dbPath: dbPath, limit: limit, dryRun: dryRun, pacingMs: effectivePacing))
     }
 
-    static func defaultOutputPath(for inputFile: String) -> String {
-        let url = URL(fileURLWithPath: inputFile)
-        let withoutExtension = url.deletingPathExtension()
-        let basePath = withoutExtension.path == url.path ? inputFile : withoutExtension.path
-        return basePath + ".geocoded.csv"
-    }
-
     static func printUsageAndExit(status: Int32 = 0) -> Never {
         let stream = status == 0 ? stdout : stderr
         fputs("""
 usage:
   geokit [--limit N] <query>
   geokit geocode [--limit N] <query>
-  geokit geocode-csv -f <file> -c <column> [-o <output>] [--include-json] [--pacing <ms>]
   geokit enrich-db [--db <path>] [--limit N] [--dry-run] [--pacing <ms>]
 
 Examples:
   geokit "Cupertino, CA"
   geokit geocode --limit 3 "coffee near Apple Park"
-  geokit geocode-csv -f locations.csv -c city
-  geokit geocode-csv -f locations.csv -c city --include-json
   geokit enrich-db --limit 10
   geokit enrich-db --dry-run
 
 Notes:
   - geocode emits pretty-printed JSON with Apple Maps result data.
-  - geocode-csv adds lat, lon, city, state, country, country_code columns.
-  - --include-json adds an apple_maps_json column containing full result JSON.
   - enrich-db geocodes places in warehouse.db that are missing coordinates
     or formatted_address and writes the results back. Use --dry-run to preview.
   - --pacing controls delay between API calls (default 1100ms).
-  - GEOKIT_CSV_PACING_MS environment variable also controls pacing.
 
 """, stream)
         exit(status)
@@ -334,9 +242,6 @@ enum CLIError: Error, CustomStringConvertible {
     case missingValue(String)
     case unknownOption(String)
     case missingRequired(String)
-    case columnNotFound(String)
-    case emptyCSV
-    case malformedCSV(String)
 
     var description: String {
         switch self {
@@ -350,12 +255,6 @@ enum CLIError: Error, CustomStringConvertible {
             return "unknown option: \(option)"
         case .missingRequired(let option):
             return "missing required option: \(option)"
-        case .columnNotFound(let column):
-            return "column not found: \(column)"
-        case .emptyCSV:
-            return "input CSV is empty"
-        case .malformedCSV(let message):
-            return "malformed CSV: \(message)"
         }
     }
 }
@@ -490,16 +389,6 @@ struct PostalAddressPayload: Codable {
     }
 }
 
-struct CSVGeocodeData {
-    let lat: String
-    let lon: String
-    let city: String
-    let state: String
-    let country: String
-    let countryCode: String
-    let resultJSON: String
-}
-
 @main
 struct Geo {
     static func main() async {
@@ -510,9 +399,6 @@ struct Geo {
             case .geocode(let options):
                 let payload = try await search(query: options.query, limit: options.limit)
                 try printJSON(payload)
-            case .geocodeCSV(let options):
-                try await geocodeCSV(options)
-                print("wrote geocoded CSV to \(options.outputFile)")
             case .enrichDB(let options):
                 try await enrichDB(options)
             }
@@ -520,102 +406,6 @@ struct Geo {
             fputs("error: \(error)\n", stderr)
             exit(1)
         }
-    }
-
-    static func geocodeCSV(_ options: GeocodeCSVOptions) async throws {
-        let content = try String(contentsOfFile: options.inputFile, encoding: .utf8)
-        let rows = try parseCSV(content)
-        guard let headerRow = rows.first else {
-            throw CLIError.emptyCSV
-        }
-
-        let columnIndex = headerRow.firstIndex(of: options.column).map { Int($0) }
-        guard let columnIndex else {
-            throw CLIError.columnNotFound(options.column)
-        }
-
-        var outputHeaders = headerRow
-        let latIndex = ensureColumn(named: "lat", in: &outputHeaders)
-        let lonIndex = ensureColumn(named: "lon", in: &outputHeaders)
-        let cityIndex = ensureColumn(named: "city", in: &outputHeaders)
-        let stateIndex = ensureColumn(named: "state", in: &outputHeaders)
-        let countryIndex = ensureColumn(named: "country", in: &outputHeaders)
-        let countryCodeIndex = ensureColumn(named: "country_code", in: &outputHeaders)
-        let jsonIndex = options.includeJSON ? ensureColumn(named: "apple_maps_json", in: &outputHeaders) : nil
-
-        var outputRows: [[String]] = [outputHeaders]
-        var cache: [String: CSVGeocodeData] = [:]
-
-        for row in rows.dropFirst() {
-            var outputRow = row
-            if outputRow.count < outputHeaders.count {
-                outputRow += Array(repeating: "", count: outputHeaders.count - outputRow.count)
-            }
-
-            let query = columnIndex < outputRow.count
-                ? outputRow[columnIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-                : ""
-
-            let geocodeData: CSVGeocodeData
-            if query.isEmpty {
-                geocodeData = CSVGeocodeData(
-                    lat: "",
-                    lon: "",
-                    city: "",
-                    state: "",
-                    country: "",
-                    countryCode: "",
-                    resultJSON: ""
-                )
-            } else if let cached = cache[query] {
-                geocodeData = cached
-            } else {
-                try await Task.sleep(for: .milliseconds(options.pacingMs))
-                let fresh = try await geocodeCSVRow(query: query)
-                cache[query] = fresh
-                geocodeData = fresh
-            }
-
-            outputRow[latIndex] = geocodeData.lat
-            outputRow[lonIndex] = geocodeData.lon
-            outputRow[cityIndex] = geocodeData.city
-            outputRow[stateIndex] = geocodeData.state
-            outputRow[countryIndex] = geocodeData.country
-            outputRow[countryCodeIndex] = geocodeData.countryCode
-            if let jsonIndex {
-                outputRow[jsonIndex] = geocodeData.resultJSON
-            }
-
-            outputRows.append(outputRow)
-        }
-
-        let outputContent = writeCSV(rows: outputRows)
-        try outputContent.write(toFile: options.outputFile, atomically: true, encoding: .utf8)
-    }
-
-    static func geocodeCSVRow(query: String) async throws -> CSVGeocodeData {
-        let payload = try await search(query: query, limit: 1)
-        guard let result = payload.results.first else {
-            return CSVGeocodeData(
-                lat: "",
-                lon: "",
-                city: "",
-                state: "",
-                country: "",
-                countryCode: "",
-                resultJSON: ""
-            )
-        }
-
-        return CSVGeocodeData(
-            lat: String(result.placemark.coordinate.latitude),
-            lon: String(result.placemark.coordinate.longitude),
-            city: result.placemark.locality ?? result.placemark.subLocality ?? "",
-            state: result.placemark.administrativeArea ?? "",
-            country: result.placemark.country ?? "",
-            countryCode: result.placemark.isoCountryCode?.lowercased() ?? "",
-            resultJSON: try encodeJSONString(result)
-        )
     }
 
     // MARK: - enrich-db
@@ -838,91 +628,6 @@ struct Geo {
         }
 
         return "Unnamed location"
-    }
-
-    static func ensureColumn(named name: String, in headers: inout [String]) -> Int {
-        if let existingIndex = headers.firstIndex(of: name) {
-            return existingIndex
-        }
-        headers.append(name)
-        return headers.count - 1
-    }
-
-    static func parseCSV(_ content: String) throws -> [[String]] {
-        var rows: [[String]] = []
-        var row: [String] = []
-        var field = ""
-        var inQuotes = false
-        var index = content.startIndex
-
-        while index < content.endIndex {
-            let character = content[index]
-
-            if inQuotes {
-                if character == "\"" {
-                    let nextIndex = content.index(after: index)
-                    if nextIndex < content.endIndex, content[nextIndex] == "\"" {
-                        field.append("\"")
-                        index = nextIndex
-                    } else {
-                        inQuotes = false
-                    }
-                } else {
-                    field.append(character)
-                }
-            } else {
-                switch character {
-                case "\"":
-                    inQuotes = true
-                case ",":
-                    row.append(field)
-                    field = ""
-                case "\n":
-                    row.append(field)
-                    rows.append(row)
-                    row = []
-                    field = ""
-                case "\r":
-                    row.append(field)
-                    rows.append(row)
-                    row = []
-                    field = ""
-
-                    let nextIndex = content.index(after: index)
-                    if nextIndex < content.endIndex, content[nextIndex] == "\n" {
-                        index = nextIndex
-                    }
-                default:
-                    field.append(character)
-                }
-            }
-
-            index = content.index(after: index)
-        }
-
-        if inQuotes {
-            throw CLIError.malformedCSV("unterminated quoted field")
-        }
-
-        if !row.isEmpty || !field.isEmpty {
-            row.append(field)
-            rows.append(row)
-        }
-
-        return rows
-    }
-
-    static func writeCSV(rows: [[String]]) -> String {
-        rows
-            .map { row in row.map(csvEscape).joined(separator: ",") }
-            .joined(separator: "\n") + "\n"
-    }
-
-    static func csvEscape(_ value: String) -> String {
-        if value.contains(",") || value.contains("\n") || value.contains("\r") || value.contains("\"") {
-            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-        }
-        return value
     }
 
     static func printJSON<T: Encodable>(_ value: T) throws {

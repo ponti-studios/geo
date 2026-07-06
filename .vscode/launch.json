@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:geo}",
+      "name": "Debug geokit",
+      "target": "geokit",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug geokit"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:geo}",
+      "name": "Release geokit",
+      "target": "geokit",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release geokit"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:geo}",
+      "name": "Debug geokit-review",
+      "target": "geokit-review",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug geokit-review"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:geo}",
+      "name": "Release geokit-review",
+      "target": "geokit-review",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release geokit-review"
+    }
+  ]
+}
