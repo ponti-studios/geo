@@ -6,7 +6,7 @@ struct ReviewAppConfig {
     static func load() throws -> ReviewAppConfig {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         let hominemDirectory = homeDirectory.appendingPathComponent(".hominem", isDirectory: true)
-        let dbURL = hominemDirectory.appendingPathComponent("db.sqlite", isDirectory: false)
+        let dbURL = hominemDirectory.appendingPathComponent("warehouse.db", isDirectory: false)
 
         try FileManager.default.createDirectory(at: hominemDirectory, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: dbURL.path) {

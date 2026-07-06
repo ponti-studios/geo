@@ -67,13 +67,13 @@ geokit geocode --limit 3 "coffee near Apple Park"
 
 ### `geokit-review` - Native macOS review UI for `place_review_candidates`
 
-A separate executable target, `geokit-review`, opens a SwiftUI macOS app for browsing and curating places directly from `~/.hominem/db.sqlite`.
+A separate executable target, `geokit-review`, opens a SwiftUI macOS app for browsing and curating places directly from `~/.hominem/warehouse.db`.
 
 ```bash
 swift run geokit-review
 ```
 
-`geokit-review` always uses `$HOME/.hominem/db.sqlite` and creates the file if it does not already exist.
+`geokit-review` always uses `$HOME/.hominem/warehouse.db` and creates the file if it does not already exist.
 
 Current capabilities:
 
