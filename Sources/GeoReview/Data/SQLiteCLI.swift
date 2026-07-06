@@ -1,5 +1,23 @@
 import Foundation
 
+/// Thread-safe Data accumulator for concurrent pipe reads.
+private final class LockedData: @unchecked Sendable {
+    private var _value = Data()
+    private let lock = NSLock()
+
+    var value: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return _value
+    }
+
+    func append(_ data: Data) {
+        lock.lock()
+        _value.append(data)
+        lock.unlock()
+    }
+}
+
 enum SQLiteCLIError: Error, LocalizedError {
     case sqlite3NotFound
     case commandFailed(String)
@@ -384,18 +402,42 @@ enum SQLiteCLI {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Read stdout and stderr concurrently to avoid pipe-buffer deadlock
+        // when the query produces >64KB of output.
+        let stdoutData = LockedData()
+        let stderrData = LockedData()
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            } else {
+                stdoutData.append(chunk)
+            }
+        }
+
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+            } else {
+                stderrData.append(chunk)
+            }
+        }
+
         try process.run()
         process.waitUntilExit()
 
-        let output = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorOutput = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Clear handlers after process exits
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
 
         guard process.terminationStatus == 0 else {
-            let message = String(data: errorOutput, encoding: .utf8) ?? "sqlite3 exited with status \(process.terminationStatus)"
+            let message = String(data: stderrData.value, encoding: .utf8) ?? "sqlite3 exited with status \(process.terminationStatus)"
             throw SQLiteCLIError.commandFailed(message)
         }
 
-        return output
+        return stdoutData.value
     }
 
     private static func sqlLiteral(_ value: String) -> String {
